@@ -1,6 +1,7 @@
 -- 1. 参数列表
 local voucherId = ARGV[1] -- 秒杀的优惠券ID
 local userId = ARGV[2] -- 用户ID
+local id = ARGV[3]
 local stockKey = 'seckill:stock:' .. voucherId
 local orderKey = 'seckill:order:' .. voucherId
 -- 2. 判断库存是否充足
@@ -15,4 +16,5 @@ end
 -- 4. 扣减库存,创建订单
 redis.call('decr', stockKey)
 redis.call('sadd', orderKey, userId)
+redis.call('xadd','stream.orders','*','userId',userId,'voucherId',voucherId,'id',id)
 return 0
