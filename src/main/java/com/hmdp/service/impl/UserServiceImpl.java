@@ -14,17 +14,24 @@ import com.hmdp.service.IUserService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RegexUtils;
 import com.hmdp.utils.SystemConstants;
+import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.servlet.http.HttpSession;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+
+import static com.hmdp.utils.RedisConstants.USER_SIGN_KEY;
 
 /**
  * <p>
@@ -85,5 +92,62 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         user.setNickName(SystemConstants.USER_NICK_NAME_PREFIX + phone);
         save(user);
         return user;
+    }
+
+    @Override
+    public Result sign() {
+        //获取当前登陆用户
+        Long id = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String yyyyMM = now.format(DateTimeFormatter.ofPattern("yyyy:MM:"));
+        String key = USER_SIGN_KEY + yyyyMM + id;
+        //获取今天是本月的第几天
+        int dayOfMonth = now.getDayOfMonth();
+        //写了redis
+        redisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        //获取当前登陆用户
+        Long id = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String yyyyMM = now.format(DateTimeFormatter.ofPattern("yyyy:MM:"));
+        String key = USER_SIGN_KEY + yyyyMM + id;
+        //获取今天是本月的第几天
+        int dayOfMonth = now.getDayOfMonth();
+        //获取截至本月今天的所有签到记录
+        List<Long> result = redisTemplate.opsForValue().bitField(
+                key,
+                BitFieldSubCommands
+                        .create()
+                        .get(BitFieldSubCommands.BitFieldType
+                                .unsigned(dayOfMonth))
+                        .valueAt(0)
+        );
+        if (result == null || result.isEmpty()) {
+            return Result.ok(0);
+        }
+        Long num = result.get(0);
+        if (num == null || num == 0) {
+            return Result.ok(0);
+        }
+        //计算连续签到天数
+        int count = 0;
+        while (true) {
+            if ((num & 1) == 0) {
+                break;
+            } else {
+                count++;
+            }
+            num >>>= 1;
+        }
+        //返回
+        return Result.ok(count);
     }
 }
