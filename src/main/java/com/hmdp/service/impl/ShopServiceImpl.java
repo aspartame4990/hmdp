@@ -8,7 +8,7 @@ import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
-import com.hmdp.utils.RedisConstants;
+import com.hmdp.utils.CacheClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -33,15 +33,20 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Autowired
     private StringRedisTemplate redisTemplate;
 
+    @Autowired
+    private CacheClient cacheClient;
+
     @Override
     public Result queryById(Long id) {
         try {
-            Shop shop = queryWithMutex(id);
+            Shop shop = cacheClient.queryWithLogicalExpire(CACHE_SHOP_KEY, LOCK_SHOP_KEY, id, Shop.class, this::getById,
+                    CACHE_SHOP_TTL, TimeUnit.MINUTES);
+//                    1L, TimeUnit.SECONDS);
             if (shop == null) {
                 return Result.fail("商铺信息不存在");
             }
             return Result.ok(shop);
-        } catch (InterruptedException e) {
+        } catch (Exception e) {
             return Result.fail("查询商铺信息失败: " + e.getMessage());
         }
     }
