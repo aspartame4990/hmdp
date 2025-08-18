@@ -3,6 +3,8 @@ package com.hmdp.service;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.hmdp.entity.ShopType;
 
+import java.util.List;
+
 /**
  * <p>
  *  服务类
@@ -13,4 +15,5 @@ import com.hmdp.entity.ShopType;
  */
 public interface IShopTypeService extends IService<ShopType> {
 
+    List<ShopType> typeList();
 }
