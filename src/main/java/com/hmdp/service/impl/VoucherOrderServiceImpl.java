@@ -9,11 +9,13 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,6 +37,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private ISeckillVoucherService seckillVoucherService;
     @Autowired
     private RedisIdWorker redisIdWorker;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 //    @Autowired @Lazy
 //    private VoucherOrderServiceImpl proxy;
 
@@ -51,16 +55,21 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("优惠券卖完了");
         }
         Long userId = UserHolder.getUser().getId();
-        synchronized (userId.toString().intern()) {
-            // 使用代理对象调用事务方法，避免事务失效
-            VoucherOrderServiceImpl proxy = (VoucherOrderServiceImpl)AopContext.currentProxy();
-            VoucherOrder voucherOrder = proxy.createOrder(voucherId, userId);
-            if (voucherOrder == null) {
-                log.info("创建订单失败，用户{}购买优惠券{}失败", userId, voucherId);
-                return Result.fail("下单失败");
-            }
-            return Result.ok(voucherOrder.getId());
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, redisTemplate);
+        boolean success = lock.tryLock(1200);
+        if (!success) {
+            return Result.fail("请勿重复下单");
         }
+        // 使用代理对象调用事务方法，避免事务失效
+        VoucherOrderServiceImpl proxy = (VoucherOrderServiceImpl) AopContext.currentProxy();
+        VoucherOrder voucherOrder = proxy.createOrder(voucherId, userId);
+        if (voucherOrder == null) {
+            log.info("创建订单失败，用户{}购买优惠券{}失败", userId, voucherId);
+            lock.unlock();
+            return Result.fail("下单失败");
+        }
+        lock.unlock();
+        return Result.ok(voucherOrder.getId());
     }
 
     @Transactional
