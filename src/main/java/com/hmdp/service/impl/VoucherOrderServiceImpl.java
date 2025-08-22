@@ -2,26 +2,29 @@ package com.hmdp.service.impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
-import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
-import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisIdWorker;
-import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
-import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import javax.annotation.PostConstruct;
+import java.util.Collections;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ExecutorService;
 
 /**
  * <p>
@@ -41,44 +44,87 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RedisIdWorker redisIdWorker;
     @Autowired
     private StringRedisTemplate redisTemplate;
-//    @Autowired @Lazy
-//    private VoucherOrderServiceImpl proxy;
+    @Autowired
+    @Lazy
+    private IVoucherOrderService proxy;
     @Autowired
     private RedissonClient redissonClient;
 
+    private static final BlockingQueue<VoucherOrder> orderTasks = new ArrayBlockingQueue<>(1024 * 1024);
+    private static final ExecutorService ORDER_TASK_EXECUTOR = Executors.newSingleThreadExecutor();
+
+    @PostConstruct
+    private void init() {
+        // 启动订单处理线程
+        ORDER_TASK_EXECUTOR.submit(new VoucherOrderHandler());
+        log.info("订单处理线程已启动");
+    }
+
+    private class VoucherOrderHandler implements Runnable {
+        @Override
+        public void run() {
+            while (true) {
+                try {
+                    // 从阻塞队列中获取订单
+                    VoucherOrder voucherOrder = orderTasks.take();
+                    // 创建订单
+                    if (proxy.createOrder(voucherOrder) == null) {
+                        log.error("创建订单失败，订单信息：{}", voucherOrder);
+                    } else {
+                        log.info("成功处理订单，订单信息：{}", voucherOrder);
+                    }
+                } catch (InterruptedException e) {
+                    log.error("订单处理线程被中断", e);
+                    Thread.currentThread().interrupt(); // 恢复中断状态
+                } catch (Exception e) {
+                    log.error("处理订单异常", e);
+                }
+            }
+        }
+    }
+
+    private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+
+    static {
+        SECKILL_SCRIPT = new DefaultRedisScript<>();
+        SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
+        SECKILL_SCRIPT.setResultType(Long.class);
+    }
+
     @Override
     public Result killVoucher(Long voucherId) {
-        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
-        if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
-            return Result.fail("秒杀未开始");
-        }
-        if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
-            return Result.fail("秒杀已结束");
-        }
-        if (voucher.getStock() < 1) {
-            return Result.fail("优惠券卖完了");
-        }
         Long userId = UserHolder.getUser().getId();
-//        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, redisTemplate);
-        RLock lock = redissonClient.getLock("lock:order:" + userId);
-        boolean success = lock.tryLock();
-        if (!success) {
-            return Result.fail("请勿重复下单");
+        // 执行lua脚本
+        Long result = redisTemplate.execute(
+                SECKILL_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString()
+        );
+        // 若结果为1，说明库存不足
+        if (result.intValue() == 1) {
+            return Result.fail("库存不足");
         }
-        // 使用代理对象调用事务方法，避免事务失效
-        VoucherOrderServiceImpl proxy = (VoucherOrderServiceImpl) AopContext.currentProxy();
-        VoucherOrder voucherOrder = proxy.createOrder(voucherId, userId);
-        if (voucherOrder == null) {
-            log.info("创建订单失败，用户{}购买优惠券{}失败", userId, voucherId);
-            lock.unlock();
-            return Result.fail("下单失败");
+        // 若结果为2，说明用户已下单
+        if (result.intValue() == 2) {
+            return Result.fail("用户已下单");
         }
-        lock.unlock();
-        return Result.ok(voucherOrder.getId());
+        // 若结果为0，说明下单成功
+        long orderId = redisIdWorker.nextId("order");
+        // 保存到阻塞队列
+        VoucherOrder voucherOrder = new VoucherOrder();
+        voucherOrder.setId(orderId);
+        voucherOrder.setVoucherId(voucherId);
+        voucherOrder.setUserId(userId);
+        orderTasks.add(voucherOrder);
+        // 返回订单ID
+        return Result.ok(orderId);
     }
 
     @Transactional
-    public VoucherOrder createOrder(Long voucherId, Long userId) {
+    public VoucherOrder createOrder(VoucherOrder voucherOrder) {
+        Long userId = voucherOrder.getUserId();
+        Long voucherId = voucherOrder.getVoucherId();
         Long userVoucherCount = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
         log.info("用户{}购买优惠券{}的数量为：{}", userId, voucherId, userVoucherCount);
         if (userVoucherCount > 0) {
@@ -93,12 +139,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             log.info("优惠券{}已经卖完了", voucherId);
             return null;
         }
-        VoucherOrder voucherOrder = new VoucherOrder();
-        voucherOrder.setId(redisIdWorker.nextId("order"));
-        voucherOrder.setVoucherId(voucherId);
-        voucherOrder.setUserId(userId);
         save(voucherOrder);
-        log.info("用户{}购买优惠券{}成功，订单为：{}", userId, voucherId, voucherOrder);
+        log.info("用户{}购买优惠券{}成功，订单号为：{}", userId, voucherId, voucherOrder.getId());
         return voucherOrder;
     }
 }
