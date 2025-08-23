@@ -35,11 +35,11 @@ class HmDianPingApplicationTests {
     private RedissonClient redissonClient3;
 
 
-//    @Test
-//    void preLoadCache() throws Exception {
-//        cacheClient.setWithLogicalExpire(RedisConstants.CACHE_SHOP_KEY + "1", shopService.getById(1L),
-//                1L, TimeUnit.SECONDS);
-//    }
+    @Test
+    void preLoadCache() throws Exception {
+        cacheClient.setWithLogicalExpire(RedisConstants.CACHE_SHOP_KEY + "1", shopService.getById(1L),
+                1L, TimeUnit.SECONDS);
+    }
 
     @Test
     void testIdWorker() {
