@@ -1,5 +1,6 @@
 package com.hmdp;
 
+import com.hmdp.entity.Shop;
 import com.hmdp.service.impl.ShopServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisConstants;
@@ -8,11 +9,20 @@ import org.junit.jupiter.api.Test;
 import org.redisson.RedissonMultiLock;
 import org.redisson.api.RedissonClient;
 import org.redisson.api.RLock;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.annotation.Resource;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
+import static com.hmdp.utils.RedisConstants.SHOP_GEO_KEY;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest
@@ -33,6 +43,9 @@ class HmDianPingApplicationTests {
     private RedissonClient redissonClient2;
     @Resource
     private RedissonClient redissonClient3;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
 
     @Test
@@ -106,5 +119,35 @@ class HmDianPingApplicationTests {
         assertFalse(l1.isLocked(), "释放后分片1应未加锁");
         assertFalse(l2.isLocked(), "释放后分片2应未加锁");
         assertFalse(l3.isLocked(), "释放后分片3应未加锁");
+    }
+
+    @Test
+    public void testLoadShopData() {
+        //查询店铺信息
+        List<Shop> list = shopService.list();
+        //分组
+        Map<Long, List<Shop>> map = list.stream().collect(Collectors.groupingBy(Shop::getTypeId));
+        //分批写入
+        for (Map.Entry<Long, List<Shop>> longListEntry : map.entrySet()) {
+            //获取类型id
+            Long typeId = longListEntry.getKey();
+            //获取店铺集合
+            List<Shop> value = longListEntry.getValue();
+            List<RedisGeoCommands.GeoLocation<String>> locations=new ArrayList<>(value.size());
+            //写入redis
+            String key = SHOP_GEO_KEY + typeId;
+            /*for (Shop shop : value) {
+                Double x = shop.getX();
+                Double y = shop.getY();
+                stringRedisTemplate.opsForGeo()
+                        .add(key
+                                , new Point(x, y)
+                                , shop.getId().toString());
+            }*/
+            for (Shop shop : value) {
+                locations.add(new RedisGeoCommands.GeoLocation<>(shop.getId().toString(),new Point(shop.getX(),shop.getY())));
+            }
+            redisTemplate.opsForGeo().add(key,locations);
+        }
     }
 }
